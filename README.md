@@ -29,11 +29,13 @@ In the app dashboard, add or customize these use cases and turn the permissions 
 
 `pages_show_list` and `business_management` come with the Page use case. The others are optional until you add them. In Development mode, App Review is not required for an admin of the app.
 
-Then allow the local callback:
+Then allow the local callback. App Domains cannot be `localhost`; that field only accepts a name with a top-level domain such as `.com`. Leave App Domains empty for local login.
 
-- **Settings → Basic → App Domains:** `localhost` (no `http://` and no port)
+- Keep the app in **Development** mode. Facebook allows a `localhost` callback there.
 - **Facebook Login → Settings → Valid OAuth Redirect URIs:** `http://localhost:53682/callback`
 - Leave **Client OAuth Login** and **Web OAuth Login** on
+
+If that redirect field says localhost is already allowed in Development, leave it blank and log in again. The “add this domain to App Domains” message is the generic warning; it does not mean `localhost` belongs in App Domains.
 
 If the Page role was granted through Business Manager, also add `ads_management` and `ads_read` on the Page use case. Facebook Login for Business grants nothing unless every requested permission is accepted.
 
