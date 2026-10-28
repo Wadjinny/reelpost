@@ -20,24 +20,22 @@ The default is all three. `--to instagram`, `--to facebook`, or `--to youtube` p
 - The video on this machine. Personal Facebook profiles cannot publish Reels through the API.
 - For YouTube, a Google Cloud project with the YouTube Data API v3 enabled, and a channel. Custom thumbnails need a phone-verified channel.
 
-Add this redirect URI in the app, under Facebook Login → Settings → Valid OAuth Redirect URIs:
+Permissions are added as use cases, not typed into the login URL. An app created with no use case has none of them, and Facebook Login then reports `Invalid Scopes`.
 
-```text
-http://localhost:53682/callback
-```
+In the app dashboard, add or customize these use cases and turn the permissions on:
 
-Add these permissions to the login configuration:
+- **Manage everything on your Page:** `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `pages_manage_engagement`, `pages_read_user_content`, `business_management`
+- **Manage messaging and content on Instagram:** `instagram_basic`, `instagram_content_publish`
 
-- `pages_show_list`
-- `pages_read_engagement`
-- `pages_manage_posts`
-- `pages_manage_engagement`
-- `pages_read_user_content`
-- `instagram_basic`
-- `instagram_content_publish`
-- `business_management`
+`pages_show_list` and `business_management` come with the Page use case. The others are optional until you add them. In Development mode, App Review is not required for an admin of the app.
 
-If the Page role was granted through Business Manager, also add `ads_management` and `ads_read` on the login configuration. Facebook Login for Business grants nothing unless every requested permission is accepted.
+Then allow the local callback:
+
+- **Settings → Basic → App Domains:** `localhost` (no `http://` and no port)
+- **Facebook Login → Settings → Valid OAuth Redirect URIs:** `http://localhost:53682/callback`
+- Leave **Client OAuth Login** and **Web OAuth Login** on
+
+If the Page role was granted through Business Manager, also add `ads_management` and `ads_read` on the Page use case. Facebook Login for Business grants nothing unless every requested permission is accepted.
 
 ## Install
 
