@@ -1,6 +1,6 @@
 # reelpost
 
-One command publishes a Reel to Instagram and a Facebook Page. The same description, hashtags, and thumbnail go to both.
+One command publishes a Reel to Instagram, a Facebook Page, and YouTube Shorts. The same description, hashtags, and thumbnail go to each one.
 
 ```bash
 reelpost publish clip.mp4 \
@@ -10,7 +10,7 @@ reelpost publish clip.mp4 \
   --yes
 ```
 
-`--to instagram` or `--to facebook` posts to one of them. The default is both.
+The default is all three. `--to instagram`, `--to facebook`, or `--to youtube` posts to one. `--to both` is Instagram and Facebook. `--to all` is the default set.
 
 ## What you need
 
@@ -18,6 +18,7 @@ reelpost publish clip.mp4 \
 - A Facebook Page you can create content on.
 - An Instagram professional account (Business or Creator) linked to that Page, if you want Instagram.
 - The video on this machine. Personal Facebook profiles cannot publish Reels through the API.
+- For YouTube, a Google Cloud project with the YouTube Data API v3 enabled, and a channel. Custom thumbnails need a phone-verified channel.
 
 Add this redirect URI in the app, under Facebook Login → Settings → Valid OAuth Redirect URIs:
 
@@ -63,7 +64,39 @@ reelpost accounts
 reelpost auth status
 ```
 
-`reelpost auth logout` deletes that file.
+`reelpost auth logout` deletes that file, including a saved YouTube login. `reelpost auth logout --youtube` removes only YouTube.
+
+## YouTube
+
+YouTube Shorts use a separate Google login. In Google Cloud, create an OAuth client of type Desktop, enable YouTube Data API v3, and add this redirect URI:
+
+```text
+http://localhost:53683/callback
+```
+
+While the app is in testing, add the Google account as a test user. The login asks for `youtube.upload` and `youtube.readonly`.
+
+```bash
+export REELPOST_YOUTUBE_CLIENT_ID=your-client-id
+export REELPOST_YOUTUBE_CLIENT_SECRET=your-client-secret
+reelpost auth youtube
+```
+
+The client secret is not saved. Leave it in the environment so the refresh token can be exchanged later. `reelpost auth login` keeps the YouTube login, and `reelpost auth youtube` keeps the Page login.
+
+```bash
+reelpost publish clip.mp4 --to youtube --privacy unlisted --thumbnail cover.jpg --yes
+```
+
+`--privacy` is `public` (the default), `unlisted`, or `private`. It applies to YouTube only. A scheduled Short is private until the chosen time, then becomes public, so `--privacy unlisted` cannot be combined with `--schedule`.
+
+YouTube requires a title of at most 100 characters. Without `--title`, reelpost uses the first line of the description. `#Shorts` is added to the YouTube description when it is not already there. It is not added to the Instagram or Facebook caption. Keyword tags are the same words, up to 500 characters.
+
+The default Data API quota is 10,000 units a day, and each video upload costs 1,600, so about 6 uploads a day until Google raises the quota. A 403 on the cover usually means the channel has no verified phone number. Retry it with:
+
+```bash
+reelpost thumbnail VIDEO_ID --to youtube --thumbnail cover.jpg --yes
+```
 
 You can skip login and set a Page token yourself:
 
@@ -87,7 +120,7 @@ reelpost publish clip.mp4 \
 
 Pass either `--description` or `--description-file`. Tags can be comma-separated or repeated, with or without `#`. Tags already written in the description are not added twice. The limit is 30 hashtags and 2200 characters.
 
-`--title` is the Facebook title. `--collaborators natgeo,someuser` invites up to three public Instagram accounts. `--place-id` tags a location Page. `--ai-generated` sets Meta’s AI label. `--reels-tab-only` keeps the Instagram Reel off the profile feed.
+`--title` is sent to YouTube and Facebook. Without it, YouTube uses the first line of the description, shortened to 100 characters. `--collaborators natgeo,someuser` invites up to three public Instagram accounts. `--place-id` tags a location Page. `--ai-generated` sets Meta’s AI label and YouTube’s synthetic-media flag. `--reels-tab-only` keeps the Instagram Reel off the profile feed. `--privacy` is YouTube only.
 
 Check a file without uploading:
 
@@ -99,22 +132,22 @@ reelpost check clip.mp4 --thumbnail cover.jpg --tags berlin
 
 ### Thumbnail
 
-- Facebook receives the image as the Reel cover.
+- Facebook and YouTube receive the image file as the cover.
 - Instagram cannot take a local file. Meta downloads `cover_url` itself. A local `--thumbnail` is served through a short-lived `cloudflared` tunnel (`https://*.trycloudflare.com`) until processing finishes. The video does not go through that tunnel. The cover image is briefly public at a random URL.
-- `--thumbnail-url https://...` skips the tunnel when the URL is already a public JPEG. It must be `https`.
-- `--thumb-offset-ms 1500` picks an Instagram frame when you have no image. Facebook still needs `--thumbnail` if you want a custom cover.
+- `--thumbnail-url https://...` skips the tunnel when the URL is already a public JPEG. It must be `https`. YouTube still downloads that image and uploads it.
+- `--thumb-offset-ms 1500` picks an Instagram frame when you have no image. Facebook and YouTube still need `--thumbnail` if you want a custom cover.
 
 `cloudflared` is required only for a local Instagram cover. It is already installed on this machine.
 
-JPEG, PNG, and WebP are accepted. PNG and WebP are converted to JPEG. Instagram covers must be 8 MB or smaller. Facebook covers must be 10 MB or smaller. A 9:16 image avoids cropping.
+JPEG, PNG, and WebP are accepted. PNG and WebP are converted to JPEG. The file is kept small enough for every selected platform: 8 MB for Instagram, 10 MB for Facebook, and 2 MB for YouTube. With all three selected, that means 2 MB. A 9:16 image avoids cropping.
 
 ### Facebook schedule
 
-Instagram cannot be scheduled with this command. Facebook can:
+Instagram cannot be scheduled. Facebook and YouTube can, together or alone:
 
 ```bash
 reelpost publish clip.mp4 \
-  --to facebook \
+  --to facebook,youtube \
   --schedule 2026-10-29T09:00+01:00 \
   --description "Tomorrow" \
   --thumbnail cover.jpg \
@@ -125,22 +158,23 @@ A time with no zone uses this computer’s local timezone. The slot has to be at
 
 ### One platform fails
 
-Facebook is attempted first, then Instagram. If one fails, the other still runs. The command exits with status 1 when either side fails. A Facebook cover that fails after the video is published can be retried:
+If a selected account is not logged in, nothing is published. After that, Facebook is attempted first, then Instagram, then YouTube. If one upload fails, the others still run. The command exits with status 1 when any side fails. A cover that fails after the video is published can be retried:
 
 ```bash
 reelpost thumbnail VIDEO_ID --thumbnail cover.jpg --yes
+reelpost thumbnail VIDEO_ID --to youtube --thumbnail cover.jpg --yes
 ```
 
 ## Video rules
 
-The command checks these before it uploads. If either selected target would reject the file, nothing is published.
+The command checks these before it uploads. If any selected target would reject the file, nothing is published.
 
-| | Instagram | Facebook Page |
-| --- | --- | --- |
-| Length | 3 seconds–15 minutes | 3–90 seconds |
-| File size | 300 MB | |
-| Picture | moov atom at the front of the file | at least 540×960, aspect from 9:16 to 16:9 |
-| Recommended | 1080×1920, H.264 or HEVC, AAC | 1080×1920, 24–60 fps |
+| | Instagram | Facebook Page | YouTube Shorts |
+| --- | --- | --- | --- |
+| Length | 3 seconds–15 minutes | 3–90 seconds | 1 second–3 minutes |
+| File size | 300 MB | | |
+| Picture | moov atom at the front of the file | at least 540×960, aspect from 9:16 to 16:9 | vertical or square |
+| Recommended | 1080×1920, H.264 or HEVC, AAC | 1080×1920, 24–60 fps | 1080×1920 |
 
 If Instagram complains about the moov atom:
 

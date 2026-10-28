@@ -38,14 +38,14 @@ def build_login_url(
     return f"https://www.facebook.com/{normalize_version(version)}/dialog/oauth?{urlencode(params)}"
 
 
-def parse_oauth_redirect(value: str, expected_state: str) -> str:
+def parse_oauth_redirect(value: str, expected_state: str, *, service: str = "Facebook") -> str:
     parsed = urlparse(value.strip())
     if not parsed.scheme or not parsed.query:
         raise ReelpostError("Paste the full redirect URL from the browser, including the code.")
     query = parse_qs(parsed.query)
     if query.get("error"):
         description = (query.get("error_description") or query.get("error") or ["login was denied"])[0]
-        raise ReelpostError(f"Facebook login failed: {description}")
+        raise ReelpostError(f"{service} login failed: {description}")
     state = (query.get("state") or [""])[0]
     if not secrets.compare_digest(state, expected_state):
         raise ReelpostError("OAuth state did not match. Start login again.")
@@ -101,16 +101,24 @@ def exchange_user_token(
     return token, expires_at
 
 
-def wait_for_code(state: str, *, timeout: float = 180, port: int = REDIRECT_PORT, host: str = REDIRECT_HOST) -> str:
+def wait_for_code(
+    state: str,
+    *,
+    timeout: float = 180,
+    port: int = REDIRECT_PORT,
+    host: str = REDIRECT_HOST,
+    service: str = "Facebook",
+    redirect_uri: str = REDIRECT_URI,
+) -> str:
     box: dict[str, str] = {}
-    server = _oauth_server(box, state, host=host, port=port)
+    server = _oauth_server(box, state, host=host, port=port, service=service)
     server.timeout = 0.5
     deadline = time.monotonic() + timeout
     try:
         while "code" not in box and "error" not in box:
             if time.monotonic() > deadline:
                 raise ReelpostError(
-                    f"Timed out waiting for Facebook login on {REDIRECT_URI}. "
+                    f"Timed out waiting for {service} login on {redirect_uri}. "
                     "Run again with --paste and copy the redirect URL by hand."
                 )
             server.handle_request()
@@ -149,7 +157,7 @@ def _token_request(session: requests.Session, version: str, params: dict) -> dic
     return body
 
 
-def _oauth_server(box: dict[str, str], state: str, *, host: str, port: int) -> ThreadingHTTPServer:
+def _oauth_server(box: dict[str, str], state: str, *, host: str, port: int, service: str = "Facebook") -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             parsed = urlparse(self.path)
@@ -157,7 +165,7 @@ def _oauth_server(box: dict[str, str], state: str, *, host: str, port: int) -> T
                 self._reply(404, "Not found")
                 return
             try:
-                box["code"] = parse_oauth_redirect(f"http://localhost{self.path}", state)
+                box["code"] = parse_oauth_redirect(f"http://localhost{self.path}", state, service=service)
             except ReelpostError as exc:
                 box["error"] = str(exc)
                 self._reply(400, str(exc))

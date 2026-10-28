@@ -4,12 +4,15 @@ import json
 
 
 class FakeResponse:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, headers=None):
         self.status_code = status
         self._payload = payload
-        self.text = json.dumps(payload)
+        self.headers = headers or {}
+        self.text = "" if payload is None else json.dumps(payload)
 
     def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
         return self._payload
 
 
@@ -19,8 +22,8 @@ class ScriptedSession:
         self.calls = []
         self.headers = {}
 
-    def push(self, payload, status=200):
-        self.queue.append(FakeResponse(payload, status))
+    def push(self, payload, status=200, headers=None):
+        self.queue.append(FakeResponse(payload, status, headers))
         return self
 
     def push_exc(self, exc):
@@ -35,8 +38,13 @@ class ScriptedSession:
             raise item
         return item
 
-    def post(self, url, data=None, headers=None, files=None, timeout=None, params=None):
-        body = data.read() if hasattr(data, "read") else data
+    def post(self, url, data=None, headers=None, files=None, timeout=None, params=None, json=None, allow_redirects=None):
+        if json is not None:
+            body = json
+        elif hasattr(data, "read"):
+            body = data.read()
+        else:
+            body = data
         file_bodies = {}
         if files:
             for key, value in files.items():
@@ -50,6 +58,25 @@ class ScriptedSession:
                 "form": data if files else None,
                 "headers": headers,
                 "files": file_bodies,
+                "params": params,
+            }
+        )
+        return self._next()
+
+    def put(self, url, data=None, headers=None, timeout=None, params=None, json=None, allow_redirects=None):
+        if json is not None:
+            body = json
+        elif hasattr(data, "read"):
+            body = data.read()
+        else:
+            body = data
+        self.calls.append(
+            {
+                "method": "PUT",
+                "url": url,
+                "data": body,
+                "headers": headers,
+                "params": params,
             }
         )
         return self._next()

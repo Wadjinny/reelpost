@@ -1,4 +1,4 @@
-"""Command line for publishing Instagram and Facebook Reels."""
+"""Command line for publishing Instagram, Facebook, and YouTube Reels."""
 
 from __future__ import annotations
 
@@ -24,21 +24,24 @@ from reelpost.auth import (
 )
 from reelpost.caption import compose_caption, parse_tags
 from reelpost.config import (
-    config_path,
+    clear_youtube_auth,
     delete_config,
     load_dotenv,
     load_settings,
     save_settings,
     update_saved_page,
+    update_youtube_auth,
 )
 from reelpost.config import Settings
 from reelpost.constants import (
     DEFAULT_SCOPES,
     FB_COVER_MAX_BYTES,
-    IG_COVER_MAX_BYTES,
     MAX_COLLABORATORS,
     REDIRECT_URI,
     TITLE_LIMIT,
+    YT_COVER_MAX_BYTES,
+    YT_REDIRECT_PORT,
+    YT_REDIRECT_URI,
 )
 from reelpost.cover_host import public_cover
 from reelpost.errors import ReelpostError
@@ -48,6 +51,7 @@ from reelpost.instagram import publish_instagram, read_quota
 from reelpost.media import (
     CoverAsset,
     cover_from_url,
+    cover_limit,
     cover_warning,
     format_bytes,
     format_seconds,
@@ -55,14 +59,28 @@ from reelpost.media import (
     limits_for,
     prepare_cover,
 )
+from reelpost.youtube import (
+    access_is_fresh,
+    build_youtube_login_url,
+    exchange_youtube_code,
+    fetch_channel,
+    publish_youtube,
+    refresh_youtube_token,
+    set_youtube_thumbnail,
+    token_expiry,
+    youtube_description,
+    youtube_tags,
+    youtube_title,
+)
 from reelpost.schedule import parse_schedule
 
 EPILOG = """examples:
   reelpost auth login
+  reelpost auth youtube
   reelpost accounts
   reelpost publish clip.mp4 --description "Morning on the canal" --tags berlin,travel --thumbnail cover.jpg --yes
-  reelpost publish clip.mp4 --to instagram --thumbnail-url https://cdn.example.com/cover.jpg --description "Hello" --yes
-  reelpost publish clip.mp4 --to facebook --schedule 2026-10-29T09:00+01:00 --thumbnail cover.jpg --yes
+  reelpost publish clip.mp4 --to youtube --privacy unlisted --thumbnail cover.jpg --yes
+  reelpost publish clip.mp4 --to facebook,youtube --schedule 2026-10-29T09:00+01:00 --thumbnail cover.jpg --yes
 """
 
 
@@ -71,7 +89,9 @@ class Job:
     video_path: Path
     targets: list[str]
     caption: str
+    tags: list[str]
     title: str | None
+    privacy: str
     collaborators: list[str]
     place_id: str | None
     schedule_at: datetime | None
@@ -114,13 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--graph-version", help="Graph API version, for example v26.0")
     parser = argparse.ArgumentParser(
         prog="reelpost",
-        description="Publish a Reel to Instagram and a Facebook Page, with a cover, description, and hashtags.",
+        description="Publish a Reel to Instagram, a Facebook Page, and YouTube Shorts, with one cover, description, and tags.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG,
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    auth = commands.add_parser("auth", help="Log in to Meta and store a Page token")
+    auth = commands.add_parser("auth", help="Log in to Meta or YouTube")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     login = auth_commands.add_parser("login", parents=[common], help="Sign in with Facebook and choose a Page")
     login.add_argument("--app-id", help="Meta app id. Defaults to REELPOST_APP_ID.")
@@ -131,11 +151,19 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--timeout", type=float, default=180, help="Seconds to wait for the browser login")
     login.set_defaults(func=cmd_login)
 
-    status = auth_commands.add_parser("status", parents=[common], help="Show the saved Page without printing tokens")
+    youtube_login = auth_commands.add_parser("youtube", parents=[common], help="Sign in with Google and store a YouTube channel")
+    youtube_login.add_argument("--client-id", help="Google OAuth client id. Defaults to REELPOST_YOUTUBE_CLIENT_ID.")
+    youtube_login.add_argument("--client-secret", help="Google OAuth client secret. Prefer REELPOST_YOUTUBE_CLIENT_SECRET.")
+    youtube_login.add_argument("--paste", action="store_true", help="Paste the redirect URL instead of listening on localhost")
+    youtube_login.add_argument("--timeout", type=float, default=180, help="Seconds to wait for the browser login")
+    youtube_login.set_defaults(func=cmd_auth_youtube)
+
+    status = auth_commands.add_parser("status", parents=[common], help="Show the saved accounts without printing tokens")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=cmd_status)
 
-    logout = auth_commands.add_parser("logout", help="Delete the saved token file")
+    logout = auth_commands.add_parser("logout", help="Delete the saved login. This removes Meta and YouTube.")
+    logout.add_argument("--youtube", action="store_true", help="Remove only the YouTube login")
     logout.set_defaults(func=cmd_logout)
 
     accounts = commands.add_parser("accounts", parents=[common], help="List Pages and linked Instagram accounts")
@@ -154,10 +182,11 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--timeout", type=float, default=600, help="Seconds to wait for each processing step")
     publish.set_defaults(func=cmd_publish)
 
-    thumbnail = commands.add_parser("thumbnail", parents=[common], help="Set the cover on a Facebook Reel that is already uploaded")
-    thumbnail.add_argument("video_id", help="Facebook video id")
+    thumbnail = commands.add_parser("thumbnail", parents=[common], help="Set the cover on a Reel that is already uploaded")
+    thumbnail.add_argument("video_id", help="Facebook video id, or an 11-character YouTube video id")
+    thumbnail.add_argument("--to", choices=["facebook", "youtube"], default="facebook", help="Where the video was published. Default: facebook.")
     thumbnail.add_argument("--thumbnail", required=True, help="Local JPEG, PNG, or WebP cover")
-    thumbnail.add_argument("--page", help="Page id or exact Page name")
+    thumbnail.add_argument("--page", help="Page id or exact Page name, for Facebook")
     thumbnail.add_argument("--yes", action="store_true")
     thumbnail.set_defaults(func=cmd_thumbnail)
     return parser
@@ -165,19 +194,32 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_media_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("video", type=Path, help="Local .mp4 or .mov file")
-    parser.add_argument("--description", "-d", help="Caption for Instagram and description for Facebook")
+    parser.add_argument("--description", "-d", help="Caption for Instagram and Facebook, and the YouTube description")
     parser.add_argument("--description-file", type=Path, help="Read the description from a text file")
     parser.add_argument("--tags", action="append", default=[], help="Hashtags, separated by commas or spaces. Repeatable.")
     parser.add_argument("--thumbnail", "-t", help="Local JPEG, PNG, or WebP cover")
     parser.add_argument("--thumbnail-url", help="Public https JPEG. Instagram can fetch this directly.")
     parser.add_argument("--thumb-offset-ms", type=int, help="Instagram cover frame, in milliseconds, when you have no image")
-    parser.add_argument("--title", help="Facebook Reel title")
-    parser.add_argument("--to", action="append", help="facebook, instagram, or both. Repeatable. Default: both.")
+    parser.add_argument("--title", help="Title for YouTube and Facebook. YouTube uses the first caption line when this is omitted.")
+    parser.add_argument(
+        "--to",
+        action="append",
+        help="facebook, instagram, youtube, both, or all. Repeatable. Default: all three.",
+    )
     parser.add_argument("--page", help="Page id or exact Page name")
     parser.add_argument("--reels-tab-only", action="store_true", help="Do not also share the Instagram Reel to the profile feed")
     parser.add_argument("--collaborators", action="append", default=[], help="Up to 3 public Instagram usernames")
     parser.add_argument("--place-id", help="Numeric Facebook Page id of a location to tag")
-    parser.add_argument("--schedule", help="Facebook publish time, ISO 8601. A time with no zone uses this machine's local zone.")
+    parser.add_argument(
+        "--schedule",
+        help="Facebook and YouTube publish time, ISO 8601. A time with no zone uses this machine's local zone. Instagram cannot be scheduled.",
+    )
+    parser.add_argument(
+        "--privacy",
+        choices=["public", "unlisted", "private"],
+        default="public",
+        help="YouTube privacy. Default: public. A scheduled Short stays private until that time, then becomes public.",
+    )
     parser.add_argument("--ai-generated", action="store_true", help="Mark the Reel as AI-generated")
     parser.add_argument("--json", action="store_true")
 
@@ -241,6 +283,12 @@ def cmd_login(args: argparse.Namespace) -> int:
             page_access_token=page["access_token"],
             ig_user_id=page.get("ig_user_id"),
             ig_username=page.get("ig_username"),
+            youtube_client_id=settings.youtube_client_id,
+            youtube_refresh_token=settings.youtube_refresh_token,
+            youtube_access_token=settings.youtube_access_token,
+            youtube_access_expires_at=settings.youtube_access_expires_at,
+            youtube_channel_id=settings.youtube_channel_id,
+            youtube_channel_title=settings.youtube_channel_title,
         )
     )
     ig = f" and @{page['ig_username']}" if page.get("ig_username") else ""
@@ -249,10 +297,67 @@ def cmd_login(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auth_youtube(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    client_id = args.client_id or settings.youtube_client_id or _env("REELPOST_YOUTUBE_CLIENT_ID")
+    client_secret = args.client_secret or _env("REELPOST_YOUTUBE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise ReelpostError(
+            "YouTube login needs a Google OAuth client id and secret. "
+            "Set REELPOST_YOUTUBE_CLIENT_ID and REELPOST_YOUTUBE_CLIENT_SECRET, "
+            "or pass --client-id and --client-secret."
+        )
+    if args.client_secret:
+        _log("warning: --client-secret can end up in shell history. Prefer REELPOST_YOUTUBE_CLIENT_SECRET.")
+    import secrets
+
+    state = secrets.token_urlsafe(24)
+    url = build_youtube_login_url(client_id, state)
+    _log(url)
+    session = requests.Session()
+    if args.paste:
+        pasted = input("Paste the redirect URL: ").strip()
+        code = parse_oauth_redirect(pasted, state, service="Google")
+    else:
+        open_browser(url)
+        code = wait_for_code(
+            state,
+            timeout=args.timeout,
+            port=YT_REDIRECT_PORT,
+            service="YouTube",
+            redirect_uri=YT_REDIRECT_URI,
+        )
+    payload = exchange_youtube_code(session, client_id, client_secret, code)
+    refresh = payload.get("refresh_token")
+    if not refresh:
+        raise ReelpostError(
+            "Google did not return a refresh token. Remove reelpost from the Google account's "
+            "third-party access and run `reelpost auth youtube` again."
+        )
+    token = payload["access_token"]
+    channel_id, channel_title = fetch_channel(session, token)
+    if not channel_id:
+        _log("warning: could not read the YouTube channel name. The login was saved anyway.")
+    settings.youtube_client_id = client_id
+    settings.youtube_refresh_token = refresh
+    settings.youtube_access_token = token
+    settings.youtube_access_expires_at = token_expiry(payload.get("expires_in"))
+    settings.youtube_channel_id = channel_id
+    settings.youtube_channel_title = channel_title
+    path = save_settings(settings)
+    label = channel_title or channel_id or "the channel"
+    print(f"Saved YouTube channel {label}")
+    _log(f"config: {path}")
+    _log("The client secret was not saved. Keep REELPOST_YOUTUBE_CLIENT_SECRET set so the login can refresh.")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     settings = _settings(args)
+    meta = bool(settings.user_access_token or settings.page_access_token)
+    youtube = _youtube_public(settings)
     payload = {
-        "logged_in": bool(settings.user_access_token or settings.page_access_token),
+        "logged_in": meta or youtube["logged_in"],
         "app_id": settings.app_id,
         "graph_version": settings.graph_version,
         "user_token": bool(settings.user_access_token),
@@ -262,30 +367,42 @@ def cmd_status(args: argparse.Namespace) -> int:
         "page_token": bool(settings.page_access_token),
         "instagram_id": settings.ig_user_id,
         "instagram_username": settings.ig_username,
+        "youtube": youtube,
     }
     if args.json:
         _emit(payload)
         return 0
-    if not payload["logged_in"]:
+    if not meta and not youtube["logged_in"]:
         print("Not logged in.")
         return 0
-    print(f"App            {settings.app_id or '-'}")
-    print(f"Graph          {settings.graph_version}")
-    print(f"User token     {'saved' if settings.user_access_token else '-'}")
-    if settings.user_token_expires_at:
-        print(f"Expires        {settings.user_token_expires_at}")
-    print(f"Page           {settings.page_name or '-'} ({settings.page_id or '-'})")
-    print(f"Page token     {'saved' if settings.page_access_token else '-'}")
-    if settings.ig_username:
-        print(f"Instagram      @{settings.ig_username} ({settings.ig_user_id})")
-    elif settings.ig_user_id:
-        print(f"Instagram      {settings.ig_user_id}")
-    else:
-        print("Instagram      not linked")
+    if meta:
+        print(f"App            {settings.app_id or '-'}")
+        print(f"Graph          {settings.graph_version}")
+        print(f"User token     {'saved' if settings.user_access_token else '-'}")
+        if settings.user_token_expires_at:
+            print(f"Expires        {settings.user_token_expires_at}")
+        print(f"Page           {settings.page_name or '-'} ({settings.page_id or '-'})")
+        print(f"Page token     {'saved' if settings.page_access_token else '-'}")
+        if settings.ig_username:
+            print(f"Instagram      @{settings.ig_username} ({settings.ig_user_id})")
+        elif settings.ig_user_id:
+            print(f"Instagram      {settings.ig_user_id}")
+        else:
+            print("Instagram      not linked")
+    if youtube["logged_in"]:
+        title = settings.youtube_channel_title or "-"
+        channel_id = settings.youtube_channel_id or "-"
+        print(f"YouTube        {title} ({channel_id})")
     return 0
 
 
-def cmd_logout(_args: argparse.Namespace) -> int:
+def cmd_logout(args: argparse.Namespace) -> int:
+    if args.youtube:
+        if clear_youtube_auth():
+            print("Removed the YouTube login.")
+        else:
+            print("YouTube is already logged out.")
+        return 0
     if delete_config():
         print("Removed the saved login.")
     else:
@@ -295,21 +412,24 @@ def cmd_logout(_args: argparse.Namespace) -> int:
 
 def cmd_accounts(args: argparse.Namespace) -> int:
     settings = _settings(args)
+    youtube = _youtube_public(settings)
+    meta = bool(settings.user_access_token or (settings.page_access_token and settings.page_id))
+    if not meta and not youtube["logged_in"]:
+        raise ReelpostError("Not logged in. Run `reelpost auth login` or `reelpost auth youtube`.")
+    public: list[dict] = []
     if settings.user_access_token:
         pages = list_pages(GraphClient(settings.user_access_token, settings.graph_version))
         if args.page:
             pages = [choose_page(pages, args.page, interactive=False)]
+        public = [public_page(page) for page in pages]
     elif settings.page_access_token and settings.page_id:
         page = _saved_page(settings)
         assert page is not None
-        pages = [enrich_instagram(GraphClient(page["access_token"], settings.graph_version), page)]
-    else:
-        raise ReelpostError("Not logged in. Run `reelpost auth login`.")
-    public = [public_page(page) for page in pages]
+        public = [public_page(enrich_instagram(GraphClient(page["access_token"], settings.graph_version), page))]
     if args.json:
-        _emit({"pages": public})
+        _emit({"pages": public, "youtube": youtube if youtube["logged_in"] else None})
         return 0
-    if not public:
+    if not public and not youtube["logged_in"]:
         print("No Pages were returned.")
         return 0
     for page in public:
@@ -321,6 +441,9 @@ def cmd_accounts(args: argparse.Namespace) -> int:
             print(f"  instagram  {page['instagram_id']}")
         else:
             print("  instagram  not linked")
+    if youtube["logged_in"]:
+        print(settings.youtube_channel_title or "YouTube")
+        print(f"  channel    {settings.youtube_channel_id or '-'}")
     return 0
 
 
@@ -357,18 +480,24 @@ def cmd_publish(args: argparse.Namespace) -> int:
             raise ReelpostError(
                 "Refusing to publish without --yes when stdin is not a terminal. Nothing was published."
             )
-        _warn_expiry(settings)
-        page = resolve_page(settings, args.page, job.targets, interactive=sys.stdin.isatty())
-        task_warning = warn_tasks(page)
-        if task_warning:
-            _log(f"warning: {task_warning}")
-        client = GraphClient(page["access_token"], settings.graph_version)
-        if "instagram" in job.targets:
-            _check_quota(client, page["ig_user_id"])
+        needs_meta = "facebook" in job.targets or "instagram" in job.targets
+        page = None
+        client = None
+        if needs_meta:
+            _warn_expiry(settings)
+            page = resolve_page(settings, args.page, job.targets, interactive=sys.stdin.isatty())
+            task_warning = warn_tasks(page)
+            if task_warning:
+                _log(f"warning: {task_warning}")
+            client = GraphClient(page["access_token"], settings.graph_version)
+            if "instagram" in job.targets:
+                _check_quota(client, page["ig_user_id"])
+        session = requests.Session()
+        youtube_token = ensure_youtube_token(settings, session) if "youtube" in job.targets else None
         if not args.yes:
             _print_plan(job, settings, dry_run=False, page=page, file=sys.stderr)
             _confirm()
-        results = _upload(job, page, client, timeout=args.timeout)
+        results = _upload(job, page, client, youtube_token=youtube_token, session=session, timeout=args.timeout)
         if args.json:
             _emit(results)
         else:
@@ -379,14 +508,29 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
 
 def cmd_thumbnail(args: argparse.Namespace) -> int:
-    if not re.fullmatch(r"\d+", args.video_id):
+    if args.to == "youtube":
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", args.video_id):
+            raise ReelpostError("YouTube video ids are 11 characters: letters, numbers, _ or -.")
+    elif not re.fullmatch(r"\d+", args.video_id):
         raise ReelpostError("video_id must be the numeric Facebook video id.")
     if not args.yes and not sys.stdin.isatty():
         raise ReelpostError("Refusing to set a cover without --yes when stdin is not a terminal.")
     settings = _settings(args)
-    page = resolve_page(settings, args.page, ["facebook"], interactive=sys.stdin.isatty())
-    asset = prepare_cover(Path(args.thumbnail), FB_COVER_MAX_BYTES)
+    limit = YT_COVER_MAX_BYTES if args.to == "youtube" else FB_COVER_MAX_BYTES
+    asset = prepare_cover(Path(args.thumbnail), limit)
     try:
+        if args.to == "youtube":
+            session = requests.Session()
+            token = ensure_youtube_token(settings, session)
+            if not args.yes:
+                label = settings.youtube_channel_title or settings.youtube_channel_id or "YouTube"
+                _log(f"Set the cover on YouTube video {args.video_id} for {label}?")
+                _confirm()
+            set_youtube_thumbnail(session, token, args.video_id, asset.path)
+            print(f"Cover updated for {args.video_id}")
+            print(f"https://www.youtube.com/shorts/{args.video_id}")
+            return 0
+        page = resolve_page(settings, args.page, ["facebook"], interactive=sys.stdin.isatty())
         if not args.yes:
             _log(f"Set the cover on Facebook video {args.video_id} for {page.get('name') or page['id']}?")
             _confirm()
@@ -415,17 +559,36 @@ def assemble(args: argparse.Namespace, *, online: bool) -> Job:
         raise ReelpostError("Pass either --thumbnail or --thumbnail-url, not both.")
     if (args.thumbnail or args.thumbnail_url) and offset is not None:
         raise ReelpostError("Pass either a thumbnail or --thumb-offset-ms, not both.")
-    if schedule_at is not None and targets != ["facebook"]:
-        raise ReelpostError("Scheduling is available for Facebook only. Run with --to facebook.")
-    if args.title and len(args.title) > TITLE_LIMIT:
-        raise ReelpostError(f"--title is {len(args.title)} characters. The limit is {TITLE_LIMIT}.")
-
+    if schedule_at is not None and "instagram" in targets:
+        raise ReelpostError(
+            "Instagram cannot be scheduled. Use --to facebook, --to youtube, or both of those."
+        )
+    if schedule_at is not None and "youtube" in targets and args.privacy == "unlisted":
+        raise ReelpostError(
+            "A scheduled YouTube Short is private until the chosen time, then becomes public. "
+            "Drop --privacy unlisted, or drop --schedule."
+        )
     info = inspect_video(Path(args.video))
     errors, warnings = limits_for(info, targets)
+    title = args.title
+    if "youtube" in targets:
+        title, title_warning = youtube_title(args.title, caption, info.path.name)
+        if title_warning:
+            warnings.append(title_warning)
+        youtube_description(caption)
+        _kept, tag_warning = youtube_tags(tags)
+        if tag_warning:
+            warnings.append(tag_warning)
+    elif args.title and len(args.title) > TITLE_LIMIT:
+        raise ReelpostError(f"--title is {len(args.title)} characters. The limit is {TITLE_LIMIT}.")
     if not caption:
         warnings.append("No description or tags were provided.")
-    if args.title and "facebook" not in targets:
-        warnings.append("--title is only sent to Facebook.")
+    if schedule_at is not None and "youtube" in targets:
+        warnings.append("The YouTube Short stays private until the scheduled time, then becomes public.")
+    if args.privacy != "public" and "youtube" not in targets:
+        warnings.append("--privacy is only sent to YouTube.")
+    if args.title and "facebook" not in targets and "youtube" not in targets:
+        warnings.append("--title is only sent to Facebook and YouTube.")
     if collaborators and "instagram" not in targets:
         warnings.append("--collaborators is only sent to Instagram.")
     if offset is not None and "instagram" not in targets:
@@ -447,7 +610,9 @@ def assemble(args: argparse.Namespace, *, online: bool) -> Job:
         video_path=info.path,
         targets=targets,
         caption=caption,
-        title=args.title,
+        tags=tags,
+        title=title,
+        privacy=args.privacy,
         collaborators=collaborators,
         place_id=place_id,
         schedule_at=schedule_at,
@@ -465,25 +630,38 @@ def assemble(args: argparse.Namespace, *, online: bool) -> Job:
 
 def parse_targets(values: list[str] | None) -> list[str]:
     if not values:
-        return ["facebook", "instagram"]
+        return ["facebook", "instagram", "youtube"]
     selected: list[str] = []
+    aliases = {
+        "facebook": "facebook",
+        "fb": "facebook",
+        "instagram": "instagram",
+        "ig": "instagram",
+        "youtube": "youtube",
+        "yt": "youtube",
+        "shorts": "youtube",
+    }
     for value in values:
         for part in value.split(","):
             name = part.strip().lower()
             if not name:
                 continue
             if name == "both":
-                for item in ("facebook", "instagram"):
-                    if item not in selected:
-                        selected.append(item)
-                continue
-            canonical = {"facebook": "facebook", "fb": "facebook", "instagram": "instagram", "ig": "instagram"}.get(name)
-            if canonical is None:
-                raise ReelpostError(f"Unknown target {part.strip()!r}. Use facebook, instagram, or both.")
-            if canonical not in selected:
-                selected.append(canonical)
+                group = ("facebook", "instagram")
+            elif name == "all":
+                group = ("facebook", "instagram", "youtube")
+            else:
+                canonical = aliases.get(name)
+                if canonical is None:
+                    raise ReelpostError(
+                        f"Unknown target {part.strip()!r}. Use facebook, instagram, youtube, both, or all."
+                    )
+                group = (canonical,)
+            for item in group:
+                if item not in selected:
+                    selected.append(item)
     if not selected:
-        raise ReelpostError("Choose at least one target: facebook, instagram, or both.")
+        raise ReelpostError("Choose at least one target: facebook, instagram, youtube, both, or all.")
     return selected
 
 
@@ -511,10 +689,20 @@ def resolve_page(settings: Settings, page_query: str | None, targets: list[str],
     return page
 
 
-def _upload(job: Job, page: dict, client: GraphClient, *, timeout: float) -> dict:
+def _upload(
+    job: Job,
+    page: dict | None,
+    client: GraphClient | None,
+    *,
+    youtube_token: str | None,
+    session,
+    timeout: float,
+) -> dict:
     results: dict[str, dict] = {}
     if "facebook" in job.targets:
         try:
+            if page is None or client is None:
+                raise ReelpostError("Missing Facebook Page.")
             results["facebook"] = publish_facebook(
                 client,
                 page["id"],
@@ -534,6 +722,8 @@ def _upload(job: Job, page: dict, client: GraphClient, *, timeout: float) -> dic
             _log(f"facebook failed: {exc}")
     if "instagram" in job.targets:
         try:
+            if page is None or client is None:
+                raise ReelpostError("Missing Facebook Page.")
             with _cover_context(job) as cover_url:
                 if cover_url:
                     _log(f"instagram cover: {cover_url}")
@@ -555,6 +745,27 @@ def _upload(job: Job, page: dict, client: GraphClient, *, timeout: float) -> dic
         except ReelpostError as exc:
             results["instagram"] = {"error": str(exc)}
             _log(f"instagram failed: {exc}")
+    if "youtube" in job.targets:
+        try:
+            if not youtube_token:
+                raise ReelpostError("YouTube is not logged in. Run `reelpost auth youtube`.")
+            results["youtube"] = publish_youtube(
+                session,
+                youtube_token,
+                job.video_path,
+                job.caption,
+                title=job.title or "Short",
+                tags=job.tags,
+                thumbnail=None if job.cover is None else job.cover.path,
+                privacy=job.privacy,
+                schedule_at=job.schedule_at,
+                ai_generated=job.ai_generated,
+                log=_log,
+                on_bytes=_Bytes("youtube upload"),
+            )
+        except ReelpostError as exc:
+            results["youtube"] = {"error": str(exc)}
+            _log(f"youtube failed: {exc}")
     return results
 
 
@@ -568,7 +779,7 @@ def _cover_context(job: Job):
 
 
 def _cover(args, targets: list[str], *, online: bool):
-    max_bytes = IG_COVER_MAX_BYTES if "instagram" in targets else FB_COVER_MAX_BYTES
+    max_bytes = cover_limit(targets)
     warnings: list[str] = []
     if args.thumbnail:
         asset = prepare_cover(Path(args.thumbnail), max_bytes)
@@ -586,7 +797,8 @@ def _cover(args, targets: list[str], *, online: bool):
         if warning:
             warnings.append(warning)
         if "instagram" in targets and not asset.reencoded:
-            if "facebook" not in targets:
+            needs_file = "facebook" in targets or "youtube" in targets
+            if not needs_file:
                 asset.close()
                 return None, args.thumbnail_url, False, warnings
             return asset, args.thumbnail_url, False, warnings
@@ -731,6 +943,9 @@ def _plan_payload(job: Job, settings: Settings | None, *, dry_run: bool) -> dict
         },
         "caption": job.caption,
         "title": job.title,
+        "privacy": job.privacy if "youtube" in job.targets else None,
+        "youtube_description": youtube_description(job.caption) if "youtube" in job.targets else None,
+        "youtube_channel": None if settings is None else settings.youtube_channel_title,
         "thumbnail": None if job.cover is None else str(job.cover.path),
         "thumbnail_url": job.thumbnail_url,
         "instagram_cover": _instagram_cover_note(job),
@@ -762,6 +977,14 @@ def _print_plan(job: Job, settings: Settings | None, *, dry_run: bool, page: dic
     print(job.caption or "(empty)", file=out)
     if job.title:
         print(f"Title: {job.title}", file=out)
+    if "youtube" in job.targets:
+        print(f"YouTube privacy: {job.privacy}", file=out)
+        description = youtube_description(job.caption)
+        if description != job.caption:
+            print("YouTube description:", file=out)
+            print(description, file=out)
+        if settings is not None and settings.youtube_channel_title:
+            print(f"YouTube: {settings.youtube_channel_title}", file=out)
     if job.schedule_at is not None:
         print(f"Schedule: {job.schedule_at.isoformat()}", file=out)
     cover = _instagram_cover_note(job)
@@ -790,7 +1013,7 @@ def _instagram_cover_note(job: Job) -> str | None:
 
 
 def _print_results(results: dict) -> None:
-    for name in ("facebook", "instagram"):
+    for name in ("facebook", "instagram", "youtube"):
         if name not in results:
             continue
         item = results[name]
@@ -806,6 +1029,13 @@ def _print_results(results: dict) -> None:
             print(f"  cover      {'set' if item.get('thumbnail') else 'default'}")
             if item.get("scheduled"):
                 print("  state      scheduled")
+        elif name == "youtube":
+            print(f"  video      {item.get('video_id')}")
+            print(f"  url        {item.get('url')}")
+            print(f"  cover      {'set' if item.get('thumbnail') else 'default'}")
+            print(f"  privacy    {item.get('privacy')}")
+            if item.get("scheduled"):
+                print(f"  state      scheduled for {item.get('publish_at')}")
         else:
             print(f"  media      {item.get('media_id')}")
             if item.get("permalink"):
@@ -826,6 +1056,45 @@ def _emit(payload: dict) -> None:
 
 def _log(message: str) -> None:
     print(f"reelpost: {message}", file=sys.stderr)
+
+
+def ensure_youtube_token(settings: Settings, session) -> str:
+    if access_is_fresh(settings.youtube_access_token, settings.youtube_access_expires_at):
+        return settings.youtube_access_token or ""
+    refresh = settings.youtube_refresh_token
+    client_id = settings.youtube_client_id or _env("REELPOST_YOUTUBE_CLIENT_ID")
+    secret = _env("REELPOST_YOUTUBE_CLIENT_SECRET")
+    if not refresh:
+        raise ReelpostError(
+            "YouTube is not logged in. Run `reelpost auth youtube`, or publish with --to facebook,instagram."
+        )
+    if not client_id or not secret:
+        raise ReelpostError(
+            "Refreshing the YouTube login needs REELPOST_YOUTUBE_CLIENT_ID and REELPOST_YOUTUBE_CLIENT_SECRET."
+        )
+    payload = refresh_youtube_token(session, client_id, secret, refresh)
+    token = payload["access_token"]
+    expiry = token_expiry(payload.get("expires_in"))
+    settings.youtube_access_token = token
+    settings.youtube_access_expires_at = expiry
+    fields = {"youtube_access_token": token, "youtube_access_expires_at": expiry}
+    if payload.get("refresh_token"):
+        settings.youtube_refresh_token = payload["refresh_token"]
+        fields["youtube_refresh_token"] = payload["refresh_token"]
+    update_youtube_auth(fields)
+    return token
+
+
+def _youtube_public(settings: Settings) -> dict:
+    logged_in = bool(
+        settings.youtube_refresh_token or settings.youtube_access_token or settings.youtube_channel_id
+    )
+    return {
+        "logged_in": logged_in,
+        "channel_id": settings.youtube_channel_id,
+        "channel_title": settings.youtube_channel_title,
+        "refresh_token": bool(settings.youtube_refresh_token),
+    }
 
 
 def _env(name: str) -> str | None:

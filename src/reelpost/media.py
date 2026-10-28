@@ -18,9 +18,13 @@ from reelpost.constants import (
     FB_MIN_LONG_SIDE,
     FB_MIN_SECONDS,
     FB_MIN_SHORT_SIDE,
+    IG_COVER_MAX_BYTES,
     IG_MAX_BYTES,
     IG_MAX_SECONDS,
     IG_MIN_SECONDS,
+    YT_COVER_MAX_BYTES,
+    YT_MAX_SECONDS,
+    YT_MIN_SECONDS,
 )
 from reelpost.errors import ReelpostError
 
@@ -147,7 +151,35 @@ def limits_for(info: VideoInfo, targets: list[str]) -> tuple[list[str], list[str
                 )
         else:
             warnings.append("Could not read video dimensions. Facebook recommends 1080×1920.")
+    if "youtube" in targets:
+        if info.duration_seconds is None:
+            warnings.append("Could not read the video duration. YouTube Shorts must be 3 minutes or shorter.")
+        elif not _within(info.duration_seconds, YT_MIN_SECONDS, YT_MAX_SECONDS):
+            errors.append(
+                "YouTube Shorts must be between 1 second and 3 minutes "
+                f"(this video is {format_seconds(info.duration_seconds)})."
+            )
+        if info.width and info.height:
+            if info.width > info.height:
+                errors.append(
+                    "YouTube Shorts must be vertical or square "
+                    f"(this video is {info.width}×{info.height})."
+                )
+        else:
+            warnings.append("Could not read video dimensions. YouTube Shorts should be vertical, ideally 1080×1920.")
     return errors, warnings
+
+
+def cover_limit(targets: list[str]) -> int:
+    """The strictest cover size among the selected platforms."""
+    limits = []
+    if "instagram" in targets:
+        limits.append(IG_COVER_MAX_BYTES)
+    if "facebook" in targets:
+        limits.append(FB_COVER_MAX_BYTES)
+    if "youtube" in targets:
+        limits.append(YT_COVER_MAX_BYTES)
+    return min(limits) if limits else FB_COVER_MAX_BYTES
 
 
 def cover_warning(width: int, height: int) -> str | None:

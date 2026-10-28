@@ -34,3 +34,17 @@ MAX_COLLABORATORS = 3
 TITLE_LIMIT = 255
 SCHEDULE_MIN = 10 * 60
 SCHEDULE_MAX_DAYS = 182
+
+# YouTube Shorts are vertical or square videos up to 3 minutes, uploaded with the Data API.
+YT_REDIRECT_PORT = 53683
+YT_REDIRECT_URI = f"http://localhost:{YT_REDIRECT_PORT}/callback"
+YT_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+YT_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+YT_SCOPES = (YT_UPLOAD_SCOPE, YT_READONLY_SCOPE)
+YT_MIN_SECONDS = 1
+YT_MAX_SECONDS = 3 * 60
+YT_TITLE_LIMIT = 100
+YT_DESCRIPTION_BYTES = 5000
+YT_TAGS_LIMIT = 500
+YT_COVER_MAX_BYTES = 2 * 1024 * 1024
+YT_CATEGORY_ID = "22"

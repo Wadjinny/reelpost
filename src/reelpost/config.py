@@ -22,6 +22,21 @@ _FILE_KEYS = (
     "page_access_token",
     "ig_user_id",
     "ig_username",
+    "youtube_client_id",
+    "youtube_refresh_token",
+    "youtube_access_token",
+    "youtube_access_expires_at",
+    "youtube_channel_id",
+    "youtube_channel_title",
+)
+
+_YOUTUBE_KEYS = (
+    "youtube_client_id",
+    "youtube_refresh_token",
+    "youtube_access_token",
+    "youtube_access_expires_at",
+    "youtube_channel_id",
+    "youtube_channel_title",
 )
 
 
@@ -37,6 +52,12 @@ class Settings:
     page_access_token: str | None = None
     ig_user_id: str | None = None
     ig_username: str | None = None
+    youtube_client_id: str | None = None
+    youtube_refresh_token: str | None = None
+    youtube_access_token: str | None = None
+    youtube_access_expires_at: str | None = None
+    youtube_channel_id: str | None = None
+    youtube_channel_title: str | None = None
 
 
 def config_dir() -> Path:
@@ -77,6 +98,12 @@ def load_settings() -> Settings:
         page_access_token=_clean(data.get("page_access_token")),
         ig_user_id=_clean(data.get("ig_user_id")),
         ig_username=_clean(data.get("ig_username")),
+        youtube_client_id=_clean(data.get("youtube_client_id")),
+        youtube_refresh_token=_clean(data.get("youtube_refresh_token")),
+        youtube_access_token=_clean(data.get("youtube_access_token")),
+        youtube_access_expires_at=_clean(data.get("youtube_access_expires_at")),
+        youtube_channel_id=_clean(data.get("youtube_channel_id")),
+        youtube_channel_title=_clean(data.get("youtube_channel_title")),
     )
     _apply_env(settings)
     settings.graph_version = normalize_version(settings.graph_version)
@@ -115,6 +142,32 @@ def update_saved_page(page: dict) -> None:
     write_config(data)
 
 
+def update_youtube_auth(fields: dict) -> None:
+    """Store a refreshed YouTube access token. Does nothing until login has created a config file."""
+    path = config_path()
+    if not path.is_file():
+        return
+    data = _read_file()
+    for key, value in fields.items():
+        if key in _YOUTUBE_KEYS:
+            data[key] = value
+    write_config(data)
+
+
+def clear_youtube_auth() -> bool:
+    path = config_path()
+    if not path.is_file():
+        return False
+    data = _read_file()
+    found = any(data.get(key) for key in _YOUTUBE_KEYS)
+    if not found:
+        return False
+    for key in _YOUTUBE_KEYS:
+        data.pop(key, None)
+    write_config(data)
+    return True
+
+
 def delete_config() -> bool:
     path = config_path()
     if not path.is_file():
@@ -151,6 +204,11 @@ def _apply_env(settings: Settings) -> None:
         "REELPOST_PAGE_TOKEN": "page_access_token",
         "REELPOST_IG_USER_ID": "ig_user_id",
         "REELPOST_IG_USERNAME": "ig_username",
+        "REELPOST_YOUTUBE_CLIENT_ID": "youtube_client_id",
+        "REELPOST_YOUTUBE_REFRESH_TOKEN": "youtube_refresh_token",
+        "REELPOST_YOUTUBE_ACCESS_TOKEN": "youtube_access_token",
+        "REELPOST_YOUTUBE_CHANNEL_ID": "youtube_channel_id",
+        "REELPOST_YOUTUBE_CHANNEL_TITLE": "youtube_channel_title",
     }
     for env_name, field in mapping.items():
         value = _clean(os.environ.get(env_name))

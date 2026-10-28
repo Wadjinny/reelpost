@@ -39,6 +39,17 @@ class MediaTests(unittest.TestCase):
         errors, _warnings = limits_for(huge, ["instagram"])
         self.assertTrue(any("300 MB" in error for error in errors))
 
+    def test_youtube_rejects_landscape_and_videos_over_three_minutes(self):
+        wide = VideoInfo(Path("clip.mp4"), 1000, 20, 1920, 1080, True)
+        errors, _warnings = limits_for(wide, ["youtube"])
+        self.assertTrue(any("vertical" in error for error in errors))
+        long = VideoInfo(Path("clip.mp4"), 1000, 181, 1080, 1920, True)
+        errors, _warnings = limits_for(long, ["youtube"])
+        self.assertTrue(any("3 minutes" in error for error in errors))
+        square = VideoInfo(Path("clip.mp4"), 1000, 20, 1080, 1080, True)
+        errors, _warnings = limits_for(square, ["youtube"])
+        self.assertEqual(errors, [])
+
     def test_png_cover_becomes_jpeg(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "cover.png"
