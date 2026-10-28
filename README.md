@@ -41,10 +41,16 @@ If the Page role was granted through Business Manager, also add `ads_management`
 
 ## Install
 
+[uv](https://docs.astral.sh/uv/) creates the virtualenv, installs the locked dependencies, and installs reelpost itself:
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync
+```
+
+Run commands through uv, or activate `.venv` and call `reelpost` directly:
+
+```bash
+uv run reelpost --help
 ```
 
 Copy `.env.example` to `.env` if you want the app id and secret loaded from the current directory.
@@ -187,5 +193,5 @@ Instagram allows 50 API posts per account per rolling 24 hours. Facebook allows 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+uv run python -m unittest discover -s tests -v
 ```
