@@ -10,6 +10,16 @@ build/
 .env
 .env.*
 !.env.example
+.envrc
+*.pem
+*.p12
+*.key
+id_rsa
+id_rsa.dsa
+credentials.json
+google-services.json
+.pypirc
+.streamlit/secrets.toml
 .coverage
 htmlcov/
 *.mp4
